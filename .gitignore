@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment and local config
+*.local
+.env
+.env.*
+.samples
+
+# Editor directories and files
+.vscode/*
+#!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+
+# Binary dependencies (bundled separately)
+ffmpeg.exe
+ffmpeg
+
+# Temporary files
+tmp/
+*.tmp
+*.bak

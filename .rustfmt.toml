@@ -1,0 +1,6 @@
+# Maximum line width
+max_width = 100
+# Newline style
+newline_style = "Unix"
+# Function parameter layout (Note: fn_params_layout is stable in recent versions, but if not, just use default)
+# fn_params_layout = "Tall" 
