@@ -62,19 +62,64 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Extract release notes
-        id: extract_release_notes
-        uses: ffurrer2/extract-release-notes@v2
+      - name: Extract release notes from CHANGELOG
+        id: release_notes
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $changelogPath = "CHANGELOG.md"
+
+          if (-not (Test-Path $changelogPath)) {
+            throw "CHANGELOG.md not found"
+          }
+
+          $lines = Get-Content -Path $changelogPath
+          $headerPattern = "^##\s+\[$([regex]::Escape($version))\]"
+          $start = -1
+
+          for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match $headerPattern) {
+              $start = $index
+              break
+            }
+          }
+
+          if ($start -eq -1) {
+            throw "No changelog section found for version $version (tag: $tag)"
+          }
+
+          $end = $lines.Count
+          for ($index = $start + 1; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match '^##\s+\[') {
+              $end = $index
+              break
+            }
+          }
+
+          if (($start + 1) -le ($end - 1)) {
+            $notes = ($lines[($start + 1)..($end - 1)] -join "`n").Trim()
+          } else {
+            $notes = ""
+          }
+
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = "Release $tag"
+          }
+
+          "release_notes<<EOF" >> $env:GITHUB_OUTPUT
+          $notes >> $env:GITHUB_OUTPUT
+          "EOF" >> $env:GITHUB_OUTPUT
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'Simple AI Whisper GUI v__VERSION__'
-          releaseBody: ${{ steps.extract_release_notes.outputs.release_notes }}
-          releaseDraft: true
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Simple AI Whisper GUI ${{ github.ref_name }}'
+          releaseBody: ${{ steps.release_notes.outputs.release_notes }}
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.rust_target }}
 

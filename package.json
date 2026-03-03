@@ -1,7 +1,7 @@
 {
   "name": "simple-ai-whisperx-gui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Simple AI transcription and summary GUI for WhisperX",
   "type": "module",
   "author": "Michał Skalczyński (skalunek) / SpliceBytes",
