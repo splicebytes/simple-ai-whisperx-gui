@@ -9,7 +9,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check": "npm run typecheck && npm run format:check && npm run clippy",
+    "typecheck": "tsc --noEmit",
+    "format:check": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
+    "format:fix": "cargo fmt --manifest-path src-tauri/Cargo.toml",
+    "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

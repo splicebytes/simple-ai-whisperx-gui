@@ -2,12 +2,20 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -56,7 +64,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install frontend dependencies
@@ -64,6 +72,7 @@ jobs:
 
       - name: Extract release notes from CHANGELOG
         id: release_notes
+        if: github.ref_type == 'tag'
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -116,8 +125,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Simple AI Whisper GUI ${{ github.ref_name }}'
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Simple AI Whisper GUI {0}', github.ref_name) || '' }}
           releaseBody: ${{ steps.release_notes.outputs.release_notes }}
           releaseDraft: false
           prerelease: false
