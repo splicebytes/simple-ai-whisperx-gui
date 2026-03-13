@@ -20,6 +20,7 @@ export interface AppConfig {
   llmEndpoint: string;
   llmModel: string;
   selectedPromptId: string;
+  llmTimeout: number;
 }
 
 export interface PromptTemplate {
@@ -48,6 +49,7 @@ const DEFAULT_CONFIG: AppConfig = {
   llmEndpoint: 'http://localhost:11434',
   llmModel: '',
   selectedPromptId: 'situational-joke',
+  llmTimeout: 3600,
 };
 
 const DEFAULT_PROMPTS: PromptTemplate[] = [

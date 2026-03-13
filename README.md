@@ -31,7 +31,7 @@ In short: if you are searching for a **WhisperX GUI**, **offline speech-to-text*
 - **Audio Transcription** — Transcribe audio files in multiple languages using WhisperX models (tiny → large-v3).
 - **Speaker Diarization** — Identify and label different speakers in the audio with playback preview.
 - **Speaker Name Assignment** — Listen to voice samples and assign real names to replace SPEAKER_XX labels across all output files.
-- **LLM Summaries** — Generate summaries, meeting minutes, or action items from transcriptions using a local LLM (Ollama, LM Studio, or any OpenAI-compatible endpoint).
+- **LLM Summaries** — Generate summaries, meeting minutes, or action items from transcriptions using a local LLM (Ollama, LM Studio, or any OpenAI-compatible endpoint). Includes real-time streaming feedback and collapsible reasoning blocks for models like DeepSeek.
 - **Customizable Prompt Templates** — Create and manage your own prompt templates for LLM summarization.
 - **Multiple Output Formats** — Results in TXT, SRT, VTT, TSV, and JSON.
 - **Auto-save or Manual Save** — Choose between automatic file saving or on-demand "Save As…".

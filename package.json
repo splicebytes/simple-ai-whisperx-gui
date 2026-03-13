@@ -1,7 +1,7 @@
 {
   "name": "simple-ai-whisperx-gui",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Simple AI transcription and summary GUI for WhisperX",
   "type": "module",
   "author": "Michał Skalczyński (skalunek) / SpliceBytes",
@@ -19,7 +19,8 @@
     "@tauri-apps/plugin-store": "^2.4.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-markdown": "^10.1.0"
+    "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

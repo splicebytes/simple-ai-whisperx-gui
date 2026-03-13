@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,11 +76,19 @@ pub struct LlmRequest {
     pub model: String,
     pub prompt: String,
     pub transcription_text: String,
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmResponse {
     pub summary: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LlmProgress {
+    pub chunk: Option<String>,
+    pub stats: Option<serde_json::Value>,
+    pub is_done: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -749,7 +758,44 @@ fn get_output_files(output_dir: String, base_name: String) -> Result<Vec<String>
 }
 
 #[tauri::command]
-async fn run_llm_summary(request: LlmRequest) -> Result<LlmResponse, String> {
+async fn fetch_llm_models(endpoint: String) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    let url = if endpoint.ends_with('/') {
+        format!("{}v1/models", endpoint)
+    } else {
+        format!("{}/v1/models", endpoint)
+    };
+
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("API error: {}", response.status()));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    let mut models = Vec::new();
+    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+        for item in data {
+            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                models.push(id.to_string());
+            }
+        }
+    }
+
+    Ok(models)
+}
+
+#[tauri::command]
+async fn run_llm_summary(app: AppHandle, request: LlmRequest) -> Result<LlmResponse, String> {
     let client = reqwest::Client::new();
 
     // Build the full prompt with transcription
@@ -767,7 +813,10 @@ async fn run_llm_summary(request: LlmRequest) -> Result<LlmResponse, String> {
                 "content": full_prompt
             }
         ],
-        "stream": false
+        "stream": true,
+        "stream_options": {
+            "include_usage": true
+        }
     });
 
     let endpoint = if request.endpoint.ends_with('/') {
@@ -779,7 +828,9 @@ async fn run_llm_summary(request: LlmRequest) -> Result<LlmResponse, String> {
     let response = client
         .post(&endpoint)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(
+            request.timeout.unwrap_or(3600),
+        ))
         .send()
         .await
         .map_err(|e| format!("LLM request failed: {}", e))?;
@@ -790,17 +841,72 @@ async fn run_llm_summary(request: LlmRequest) -> Result<LlmResponse, String> {
         return Err(format!("LLM API error ({}): {}", status, text));
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+    let mut stream = response.bytes_stream();
+    let mut full_summary = String::new();
+    let mut buffer = String::new();
 
-    let summary = json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("No response generated")
-        .to_string();
+    while let Some(item) = stream.next().await {
+        let chunk_bytes = item.map_err(|e| format!("Error reading stream: {}", e))?;
+        let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+        buffer.push_str(&chunk_str);
 
-    Ok(LlmResponse { summary })
+        // Process line by line for SSE
+        while let Some(newline_idx) = buffer.find('\n') {
+            let line = buffer[..newline_idx].trim().to_string();
+            buffer = buffer[newline_idx + 1..].to_string();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            if line.starts_with("data: ") {
+                let json_str = &line[6..];
+                if json_str == "[DONE]" {
+                    break;
+                }
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        full_summary.push_str(content);
+                        let _ = app.emit(
+                            "llm-progress",
+                            LlmProgress {
+                                chunk: Some(content.to_string()),
+                                stats: None,
+                                is_done: false,
+                            },
+                        );
+                    }
+
+                    // Look for stats in the final chunk (OpenAI/LM Studio specific sometimes)
+                    // Ollama often puts stats in the final object of the stream.
+                    if let Some(usage) = json.get("usage") {
+                        let _ = app.emit(
+                            "llm-progress",
+                            LlmProgress {
+                                chunk: None,
+                                stats: Some(usage.clone()),
+                                is_done: false,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "llm-progress",
+        LlmProgress {
+            chunk: None,
+            stats: None,
+            is_done: true,
+        },
+    );
+
+    Ok(LlmResponse {
+        summary: full_summary,
+    })
 }
 
 #[tauri::command]
@@ -1232,6 +1338,7 @@ pub fn run() {
             read_transcription_file,
             get_output_files,
             run_llm_summary,
+            fetch_llm_models,
             replace_speaker_names,
             extract_audio_segment,
             save_text_file,

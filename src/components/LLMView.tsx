@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import ReactMarkdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw';
 import type { TranscriptionResultData } from '../App';
 import {
     AppConfig,
@@ -12,10 +14,53 @@ import {
     savePrompts,
 } from '../lib/store';
 
+interface LlmProgress {
+    chunk: string | null;
+    stats: any | null;
+    is_done: boolean;
+}
+
 interface LLMViewProps {
     lastResult?: TranscriptionResultData | null;
     refreshKey?: number;
 }
+
+const processThinkBlocks = (text: string) => {
+    if (!text.includes('<think>')) return text;
+
+    let result = '';
+    let isThinking = false;
+    
+    // Split text by <think> and </think> tags
+    const parts = text.split(/(<think>|<\/think>)/);
+    
+    for (const part of parts) {
+        if (part === '<think>') {
+            isThinking = true;
+            // Use details/summary for collapsible section. Open by default while streaming.
+            result += '<details className="think-block" open>\n<summary>💭 Reasoning</summary>\n<div className="think-content">\n\n';
+        } else if (part === '</think>') {
+            isThinking = false;
+            // Close the div and details tags. Then use a hack to close the details tag automatically when finished.
+            // A React trick: we can replace the open tag with a closed one by replacing the string later, but for now we close the tags.
+            result += '\n</div>\n</details>\n\n';
+        } else {
+            if (isThinking) {
+                // Keep the content as is, CSS will handle the styling inside think-content
+                result += part;
+            } else {
+                result += part;
+            }
+        }
+    }
+    
+    // If the whole stream finished (we have both tags), collapse it by removing ' open' attribute
+    if (text.includes('</think>')) {
+        result = result.replace(/<details className="think-block" open>/g, '<details className="think-block">');
+    }
+    
+    return result;
+};
 
 export default function LLMView({ lastResult }: LLMViewProps) {
     const [config, setConfig] = useState<AppConfig | null>(null);
@@ -29,6 +74,11 @@ export default function LLMView({ lastResult }: LLMViewProps) {
     const [isLoading, setIsLoading] = useState(false);
     const [saved, setSaved] = useState(false);
     const [renderMarkdown, setRenderMarkdown] = useState(true);
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
+    const [isFetchingModels, setIsFetchingModels] = useState(false);
+    const [showModelDropdown, setShowModelDropdown] = useState(false);
+    const [llmStats, setLlmStats] = useState<any | null>(null);
+    const [generationTimeMs, setGenerationTimeMs] = useState<number | null>(null);
 
     useEffect(() => {
         loadConfig().then(setConfig);
@@ -41,12 +91,32 @@ export default function LLMView({ lastResult }: LLMViewProps) {
         setTranscriptionText('');
     }, [lastResult]);
 
+    // Fetch available models when endpoint changes
+    const fetchModels = useCallback(async () => {
+        if (!config?.llmEndpoint || !config.llmEnabled) return;
+        setIsFetchingModels(true);
+        try {
+            const models = await invoke<string[]>('fetch_llm_models', { endpoint: config.llmEndpoint });
+            setAvailableModels(models);
+        } catch (err) {
+            console.warn('Failed to fetch models:', err);
+            setAvailableModels([]);
+        } finally {
+            setIsFetchingModels(false);
+        }
+    }, [config?.llmEndpoint, config?.llmEnabled]);
+
+    useEffect(() => {
+        const timer = setTimeout(fetchModels, 500);
+        return () => clearTimeout(timer);
+    }, [fetchModels]);
+
     const updateConfig = useCallback(
-        (key: keyof AppConfig, value: string | boolean) => {
+        (updates: Partial<AppConfig>) => {
             if (!config) return;
-            const updated = { ...config, [key]: value };
+            const updated = { ...config, ...updates };
             setConfig(updated);
-            updateStoreConfig({ [key]: value });
+            updateStoreConfig(updates);
         },
         [config]
     );
@@ -60,6 +130,7 @@ export default function LLMView({ lastResult }: LLMViewProps) {
             llmEndpoint: config.llmEndpoint,
             llmModel: config.llmModel,
             selectedPromptId: config.selectedPromptId,
+            llmTimeout: config.llmTimeout,
         });
         setSaved(true);
         setTimeout(() => setSaved(false), 3000);
@@ -108,7 +179,7 @@ export default function LLMView({ lastResult }: LLMViewProps) {
             setPrompts(updated);
             await savePrompts(updated);
             if (config?.selectedPromptId === id) {
-                updateConfig('selectedPromptId', updated[0]?.id || '');
+                updateConfig({ selectedPromptId: updated[0]?.id || '' });
             }
         },
         [prompts, config, updateConfig]
@@ -145,14 +216,31 @@ export default function LLMView({ lastResult }: LLMViewProps) {
 
         setIsLoading(true);
         setSummaryResult('');
+        setLlmStats(null);
+        setGenerationTimeMs(null);
+
+        const startTime = Date.now();
+        let unlisten: (() => void) | null = null;
 
         try {
+            unlisten = await listen<LlmProgress>('llm-progress', (event) => {
+                const { chunk, stats } = event.payload;
+                if (chunk) {
+                    setSummaryResult((prev) => prev + chunk);
+                }
+                if (stats) {
+                    setLlmStats(stats);
+                    setGenerationTimeMs(Date.now() - startTime);
+                }
+            });
+
             const result = await invoke<{ summary: string }>('run_llm_summary', {
                 request: {
                     endpoint: freshConfig.llmEndpoint,
                     model: freshConfig.llmModel,
                     prompt: selectedPrompt.content,
                     transcription_text: textToUse,
+                    timeout: freshConfig.llmTimeout,
                 },
             });
             setSummaryResult(result.summary);
@@ -186,7 +274,11 @@ export default function LLMView({ lastResult }: LLMViewProps) {
         } catch (err) {
             setSummaryResult(`Error: ${err}`);
         } finally {
+            if (unlisten) unlisten();
             setIsLoading(false);
+            if (!generationTimeMs) {
+                setGenerationTimeMs(Date.now() - startTime);
+            }
         }
     }, [prompts, transcriptionText, lastResult]);
 
@@ -231,7 +323,7 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                     </div>
                     <div
                         className="toggle-group"
-                        onClick={() => updateConfig('llmEnabled', !config.llmEnabled)}
+                        onClick={() => updateConfig({ llmEnabled: !config.llmEnabled })}
                     >
                         <div className={`toggle ${config.llmEnabled ? 'active' : ''}`} />
                     </div>
@@ -243,7 +335,7 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                     {/* Left - Config & Prompts */}
                     <div>
                         {/* LLM Configuration */}
-                        <div className="card mb-lg">
+                        <div className="card mb-lg" style={{ position: 'relative', zIndex: 10 }}>
                             <div className="card-header">
                                 <h2 className="card-title">
                                     <span className="card-title-icon">🔗</span>
@@ -257,11 +349,13 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                                     className="form-select"
                                     value={config.llmProvider}
                                     onChange={(e) => {
-                                        updateConfig('llmProvider', e.target.value);
-                                        if (e.target.value === 'ollama') {
-                                            updateConfig('llmEndpoint', 'http://localhost:11434');
-                                        } else if (e.target.value === 'lmstudio') {
-                                            updateConfig('llmEndpoint', 'http://localhost:1234');
+                                        const newProvider = e.target.value;
+                                        if (newProvider === 'ollama') {
+                                            updateConfig({ llmProvider: newProvider, llmEndpoint: 'http://localhost:11434' });
+                                        } else if (newProvider === 'lmstudio') {
+                                            updateConfig({ llmProvider: newProvider, llmEndpoint: 'http://localhost:1234' });
+                                        } else {
+                                            updateConfig({ llmProvider: newProvider });
                                         }
                                     }}
                                 >
@@ -278,19 +372,105 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                                     type="text"
                                     placeholder="http://localhost:11434"
                                     value={config.llmEndpoint}
-                                    onChange={(e) => updateConfig('llmEndpoint', e.target.value)}
+                                    onChange={(e) => updateConfig({ llmEndpoint: e.target.value })}
                                 />
                             </div>
 
+                            <div className="form-group" style={{ position: 'relative', zIndex: 50 }}>
+                                <label className="form-label flex items-center justify-between">
+                                    <span>Model</span>
+                                    <button
+                                        className="btn btn-ghost btn-sm"
+                                        onClick={fetchModels}
+                                        title="Refresh models"
+                                        disabled={isFetchingModels}
+                                        style={{ padding: '2px 6px', height: 'auto', fontSize: '0.8rem' }}
+                                    >
+                                        🔄 Refresh
+                                    </button>
+                                </label>
+                                <div className="input-group" style={{ position: 'relative' }}>
+                                    <input
+                                        className="form-input w-full"
+                                        type="text"
+                                        placeholder="e.g. llama3, mistral, gemma2..."
+                                        value={config.llmModel}
+                                        onChange={(e) => updateConfig({ llmModel: e.target.value })}
+                                        onFocus={() => setShowModelDropdown(true)}
+                                        onBlur={() => setTimeout(() => setShowModelDropdown(false), 200)}
+                                    />
+                                    {isFetchingModels && (
+                                        <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)' }}>
+                                            <span className="spinner" style={{ width: '16px', height: '16px', borderWidth: '2px' }} />
+                                        </div>
+                                    )}
+
+                                    {showModelDropdown && (availableModels.length > 0 || isFetchingModels) && (
+                                        <div className="dropdown-menu shadow-lg rounded-md"
+                                            style={{
+                                                position: 'absolute',
+                                                top: '100%',
+                                                left: 0,
+                                                right: 0,
+                                                zIndex: 9999,
+                                                background: 'var(--bg-secondary)',
+                                                border: '1px solid var(--border-color)',
+                                                borderRadius: 'var(--radius-md)',
+                                                marginTop: '4px',
+                                                maxHeight: '200px',
+                                                overflowY: 'auto',
+                                                boxShadow: '0 10px 25px rgba(0,0,0,0.5)'
+                                            }}>
+                                            {isFetchingModels && availableModels.length === 0 ? (
+                                                <div style={{ padding: '8px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 'var(--font-size-sm)' }}>
+                                                    Loading models...
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {availableModels.map(m => (
+                                                        <div
+                                                            key={m}
+                                                            style={{
+                                                                padding: '8px 12px',
+                                                                cursor: 'pointer',
+                                                                borderBottom: '1px solid var(--border-glass)',
+                                                                fontWeight: config.llmModel === m ? 'bold' : 'normal',
+                                                                color: config.llmModel === m ? 'var(--accent-primary)' : 'var(--text-primary)'
+                                                            }}
+                                                            onMouseEnter={(e) => {
+                                                                e.currentTarget.style.background = 'var(--bg-card-hover)';
+                                                            }}
+                                                            onMouseLeave={(e) => {
+                                                                e.currentTarget.style.background = 'transparent';
+                                                            }}
+                                                            onClick={() => {
+                                                                updateConfig({ llmModel: m });
+                                                                setShowModelDropdown(false);
+                                                            }}
+                                                        >
+                                                            {m}
+                                                        </div>
+                                                    ))}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
                             <div className="form-group">
-                                <label className="form-label">Model</label>
+                                <label className="form-label">Timeout (seconds)</label>
                                 <input
                                     className="form-input"
-                                    type="text"
-                                    placeholder="e.g. llama3, mistral, gemma2..."
-                                    value={config.llmModel}
-                                    onChange={(e) => updateConfig('llmModel', e.target.value)}
+                                    type="number"
+                                    min="1"
+                                    placeholder="3600"
+                                    value={config.llmTimeout}
+                                    onChange={(e) => updateConfig({ llmTimeout: parseInt(e.target.value, 10) || 3600 })}
                                 />
+                                <p className="text-secondary" style={{ fontSize: '0.75rem', marginTop: '4px' }}>
+                                    Local models can take longer to process. Increase this if you get timeout errors.
+                                </p>
                             </div>
 
                             <button className="btn btn-secondary btn-full" onClick={handleSaveSettings}>
@@ -315,7 +495,7 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                                     <div
                                         key={prompt.id}
                                         className={`prompt-card ${config.selectedPromptId === prompt.id ? 'selected' : ''}`}
-                                        onClick={() => updateConfig('selectedPromptId', prompt.id)}
+                                        onClick={() => updateConfig({ selectedPromptId: prompt.id })}
                                     >
                                         <div>
                                             <div className="prompt-card-name">{prompt.name}</div>
@@ -379,12 +559,30 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                             >
                                 {isLoading ? (
                                     <>
-                                        <span className="spinner" /> Generating summary...
+                                        <span className="spinner" /> {summaryResult ? 'Generating...' : 'Started...'}
                                     </>
                                 ) : (
                                     '🤖 Summarize'
                                 )}
                             </button>
+
+                            {llmStats && generationTimeMs && (
+                                <div className="mt-md p-sm rounded bg-glass text-xs flex flex-wrap gap-md opacity-80">
+                                    {llmStats.completion_tokens && generationTimeMs > 0 && (
+                                        <span>
+                                            ⚡ {(llmStats.completion_tokens / (generationTimeMs / 1000)).toFixed(1)} tokens/s
+                                        </span>
+                                    )}
+                                    <span>
+                                        🕒 {(generationTimeMs / 1000).toFixed(1)}s total
+                                    </span>
+                                    {llmStats.prompt_tokens && (
+                                        <span>
+                                            📥 {llmStats.prompt_tokens} prompt tokens
+                                        </span>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
 
@@ -427,7 +625,9 @@ export default function LLMView({ lastResult }: LLMViewProps) {
                                 <div>
                                     {renderMarkdown ? (
                                         <div className="llm-result markdown-body">
-                                            <ReactMarkdown>{summaryResult}</ReactMarkdown>
+                                            <ReactMarkdown rehypePlugins={[rehypeRaw]}>
+                                                {processThinkBlocks(summaryResult)}
+                                            </ReactMarkdown>
                                         </div>
                                     ) : (
                                         <div className="llm-result selectable-text">{summaryResult}</div>
